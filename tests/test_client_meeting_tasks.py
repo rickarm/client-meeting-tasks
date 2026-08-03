@@ -297,5 +297,36 @@ class TestEnvFile(unittest.TestCase):
         self.assertEqual(cmt.parse_env_file("/nonexistent/.env"), {})
 
 
+class TestGoogleCredentialAliases(unittest.TestCase):
+    """GCAL_* is accepted so an existing credential need not be duplicated."""
+
+    def config_from(self, contents):
+        with tempfile.NamedTemporaryFile("w", suffix=".env", delete=False) as fh:
+            fh.write(contents)
+            path = fh.name
+        try:
+            return cmt.load_config(env_files=[path])
+        finally:
+            os.unlink(path)
+
+    def test_gcal_names_are_accepted(self):
+        cfg = self.config_from("GCAL_CLIENT_ID=cid\nGCAL_CLIENT_SECRET=sec\n"
+                               "GCAL_REFRESH_TOKEN=tok\n")
+        self.assertEqual(cfg.google_client_id, "cid")
+        self.assertEqual(cfg.google_client_secret, "sec")
+        self.assertEqual(cfg.google_refresh_token, "tok")
+
+    def test_google_oauth_names_win_when_both_are_set(self):
+        cfg = self.config_from("GOOGLE_OAUTH_CLIENT_ID=canonical\nGCAL_CLIENT_ID=alias\n")
+        self.assertEqual(cfg.google_client_id, "canonical")
+
+    def test_empty_canonical_falls_through_to_the_alias(self):
+        cfg = self.config_from("GOOGLE_OAUTH_CLIENT_ID=\nGCAL_CLIENT_ID=alias\n")
+        self.assertEqual(cfg.google_client_id, "alias")
+
+    def test_neither_set_is_empty_not_an_error(self):
+        self.assertEqual(self.config_from("UNRELATED=1\n").google_client_id, "")
+
+
 if __name__ == "__main__":
     unittest.main()

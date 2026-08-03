@@ -37,9 +37,9 @@ All configuration comes from environment variables. The tool also reads `~/.env`
 
 | Variable | Required | Default | Meaning |
 |----------|----------|---------|---------|
-| `GOOGLE_OAUTH_CLIENT_ID` | yes | — | OAuth client id (Desktop app type) |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | yes | — | OAuth client secret |
-| `GOOGLE_OAUTH_REFRESH_TOKEN` | yes | — | From the one-time `auth` subcommand |
+| `GOOGLE_OAUTH_CLIENT_ID` | yes | — | OAuth client id (Desktop app type). Alias: `GCAL_CLIENT_ID` |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | yes | — | OAuth client secret. Alias: `GCAL_CLIENT_SECRET` |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | yes | — | From the one-time `auth` subcommand. Alias: `GCAL_REFRESH_TOKEN` |
 | `AIRTABLE_API_KEY` | yes | — | Airtable personal access token |
 | `CMT_AIRTABLE_BASE_ID` | yes | — | Base id (`app…`) holding the contacts table |
 | `CMT_GOOGLE_CALENDAR_ID` | no | `primary` | Calendar to scan |
@@ -54,6 +54,11 @@ All configuration comes from environment variables. The tool also reads `~/.env`
 | `CMT_DEDUP_WINDOW_DAYS` | no | `3` | Duplicate window, see below |
 
 ### One-time Google setup
+
+Skip this entirely if you already have a Google OAuth client and refresh token with
+the `calendar.readonly` scope in `~/.env` under `GCAL_CLIENT_ID` /
+`GCAL_CLIENT_SECRET` / `GCAL_REFRESH_TOKEN` — those names are read as aliases, so
+the credential does not need to be duplicated under a second name.
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create (or reuse) a
    project, enable the **Google Calendar API**, and create an OAuth client of type

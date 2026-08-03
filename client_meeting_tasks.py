@@ -63,6 +63,13 @@ EXIT_CONFIG = 1
 EXIT_API = 2
 EXIT_THINGS = 3
 
+# Accepted env var names, in preference order. GCAL_* is supported so an
+# existing calendar.readonly credential can be reused as-is rather than copied
+# under a second name; the first non-empty one wins.
+GOOGLE_CLIENT_ID_KEYS = ("GOOGLE_OAUTH_CLIENT_ID", "GCAL_CLIENT_ID")
+GOOGLE_CLIENT_SECRET_KEYS = ("GOOGLE_OAUTH_CLIENT_SECRET", "GCAL_CLIENT_SECRET")
+GOOGLE_REFRESH_TOKEN_KEYS = ("GOOGLE_OAUTH_REFRESH_TOKEN", "GCAL_REFRESH_TOKEN")
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -128,14 +135,24 @@ def load_config(env_files=None) -> Config:
     def get(key, default=""):
         return env.get(key, default) or default
 
+    def get_any(keys, default=""):
+        """First non-empty of several accepted names, in preference order."""
+        for key in keys:
+            value = env.get(key) or ""
+            if value:
+                return value
+        return default
+
     statuses = tuple(
         s.strip() for s in get("CMT_ACTIVE_STATUSES", "Active-coaching,Active-advising").split(",")
         if s.strip()
     )
     return Config(
-        google_client_id=get("GOOGLE_OAUTH_CLIENT_ID"),
-        google_client_secret=get("GOOGLE_OAUTH_CLIENT_SECRET"),
-        google_refresh_token=get("GOOGLE_OAUTH_REFRESH_TOKEN"),
+        # GCAL_* are accepted as aliases so an existing calendar.readonly
+        # credential already in ~/.env can be reused without duplicating it.
+        google_client_id=get_any(GOOGLE_CLIENT_ID_KEYS),
+        google_client_secret=get_any(GOOGLE_CLIENT_SECRET_KEYS),
+        google_refresh_token=get_any(GOOGLE_REFRESH_TOKEN_KEYS),
         calendar_id=get("CMT_GOOGLE_CALENDAR_ID", "primary"),
         airtable_api_key=get("AIRTABLE_API_KEY"),
         airtable_base_id=get("CMT_AIRTABLE_BASE_ID"),
@@ -317,13 +334,15 @@ class Meeting:
 
 
 def google_access_token(cfg: Config) -> str:
-    for key, value in (
-        ("GOOGLE_OAUTH_CLIENT_ID", cfg.google_client_id),
-        ("GOOGLE_OAUTH_CLIENT_SECRET", cfg.google_client_secret),
-        ("GOOGLE_OAUTH_REFRESH_TOKEN", cfg.google_refresh_token),
+    for keys, value in (
+        (GOOGLE_CLIENT_ID_KEYS, cfg.google_client_id),
+        (GOOGLE_CLIENT_SECRET_KEYS, cfg.google_client_secret),
+        (GOOGLE_REFRESH_TOKEN_KEYS, cfg.google_refresh_token),
     ):
         if not value:
-            raise SystemExit2(EXIT_CONFIG, f"{key} is not set (run the `auth` subcommand for the refresh token)")
+            raise SystemExit2(
+                EXIT_CONFIG,
+                f"{' or '.join(keys)} is not set (run the `auth` subcommand for the refresh token)")
     body = urllib.parse.urlencode({
         "client_id": cfg.google_client_id,
         "client_secret": cfg.google_client_secret,
