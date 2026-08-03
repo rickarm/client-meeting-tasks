@@ -22,4 +22,7 @@ jobs:
       - name: Run Claude Code
         uses: anthropics/claude-code-action@v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Bills against the Max subscription rather than metered API credits.
+          # This repo has CLAUDE_CODE_OAUTH_TOKEN and no ANTHROPIC_API_KEY, so
+          # the previous line could never have authenticated here.
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
