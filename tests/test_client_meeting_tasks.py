@@ -94,6 +94,37 @@ class TestNames(unittest.TestCase):
         self.assertEqual(names["Brett Taylor"], "Brett T.")
 
 
+class TestDecodeThingsDate(unittest.TestCase):
+    """Things packs deadline/startDate as bits, not a unix timestamp.
+
+    The two raw values below were read out of a live Things database next to
+    their known calendar dates, so they pin the layout against real data.
+    """
+
+    def test_known_raw_values_from_a_live_database(self):
+        self.assertEqual(cmt.decode_things_date(132809600), date(2026, 8, 7))
+        self.assertEqual(cmt.decode_things_date(132809728), date(2026, 8, 8))
+
+    def test_round_trips_across_month_and_year_boundaries(self):
+        for expected in (date(2026, 1, 1), date(2026, 12, 31), date(2027, 2, 28),
+                         date(2026, 8, 31), date(2030, 6, 15)):
+            packed = (expected.year << 16) | (expected.month << 12) | (expected.day << 7)
+            self.assertEqual(cmt.decode_things_date(packed), expected)
+
+    def test_missing_and_zero_are_none(self):
+        self.assertIsNone(cmt.decode_things_date(None))
+        self.assertIsNone(cmt.decode_things_date(0))
+
+    def test_nonsense_packing_is_none_not_a_crash(self):
+        # month 15 / day 0 cannot be a real date; must not raise.
+        self.assertIsNone(cmt.decode_things_date((2026 << 16) | (15 << 12) | (1 << 7)))
+        self.assertIsNone(cmt.decode_things_date((2026 << 16) | (1 << 12) | (0 << 7)))
+
+    def test_not_confused_with_a_unix_timestamp(self):
+        """A epoch-seconds value must not silently decode to a plausible date."""
+        self.assertIsNone(cmt.decode_things_date(1754179200))
+
+
 class TestNormTitle(unittest.TestCase):
     def test_dash_and_whitespace_variants_match(self):
         self.assertEqual(cmt.norm_title("Prep – Bob"), cmt.norm_title("prep - bob"))
@@ -153,9 +184,11 @@ class TestPlanTasks(unittest.TestCase):
     def test_pair_per_meeting_with_correct_deadlines(self):
         today = date(2026, 8, 3)
         planned = cmt.plan_tasks([self.meeting("Bob Moore", date(2026, 8, 5))], today)
+        # 2026-08-05 is a Wednesday; BOTH tasks carry the meeting's weekday,
+        # so Prep is "(Wed)" even though it is due on the Tuesday.
         self.assertEqual([(t.title, t.deadline) for t in planned],
-                         [("Prep - Bob", date(2026, 8, 4)),   # day BEFORE the meeting
-                          ("Notes - Bob", date(2026, 8, 5))])  # day OF the meeting
+                         [("Prep - Bob (Wed)", date(2026, 8, 4)),   # day BEFORE the meeting
+                          ("Notes - Bob (Wed)", date(2026, 8, 5))])  # day OF the meeting
 
     def test_same_day_meeting_prep_clamped_to_today(self):
         today = date(2026, 8, 3)
@@ -179,8 +212,28 @@ class TestPlanTasks(unittest.TestCase):
         planned = cmt.plan_tasks([self.meeting("Brett Levenson", date(2026, 8, 4)),
                                   self.meeting("Brett Taylor", date(2026, 8, 5))], today)
         titles = {t.title for t in planned}
-        self.assertIn("Prep - Brett L.", titles)
-        self.assertIn("Prep - Brett T.", titles)
+        self.assertIn("Prep - Brett L. (Tue)", titles)
+        self.assertIn("Prep - Brett T. (Wed)", titles)
+
+    def test_suffix_is_the_meeting_weekday_not_the_deadline_weekday(self):
+        """A Monday meeting preps on Sunday but is still labelled (Mon)."""
+        planned = cmt.plan_tasks([self.meeting("Bob Moore", date(2026, 8, 10))],
+                                 date(2026, 8, 3))
+        prep = planned[0]
+        self.assertEqual(prep.title, "Prep - Bob (Mon)")
+        self.assertEqual(prep.deadline, date(2026, 8, 9))       # a Sunday
+        self.assertEqual(prep.deadline.strftime("%a"), "Sun")
+
+    def test_titles_match_the_existing_project_convention(self):
+        """Guards the exact shape already present in Things (e.g. 'Prep - Marissa (Wed)')."""
+        planned = cmt.plan_tasks([self.meeting("Marissa Dent", date(2026, 8, 12))],
+                                 date(2026, 8, 3))
+        self.assertEqual([t.title for t in planned],
+                         ["Prep - Marissa (Wed)", "Notes - Marissa (Wed)"])
+
+    def test_weekday_abbreviations_are_locale_independent(self):
+        for i, expected in enumerate(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
+            self.assertEqual(cmt.WEEKDAY_ABBR[i], expected)
 
 
 class TestEventFiltering(unittest.TestCase):
