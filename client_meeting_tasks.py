@@ -10,7 +10,11 @@ Pipeline:
         "Prep - <first name>"   deadline = day before the meeting
         "Notes - <first name>"  deadline = day of the meeting
   5. Read existing to-dos in the Things project and skip anything that already
-     exists (see duplicate rules below), then create the rest via AppleScript.
+     exists (see duplicate rules below), then create the rest.
+
+Things access is read-via-sqlite / write-via-things:/// URL scheme, not
+AppleScript: an Apple Events grant is attributed to the controlling terminal
+app, so it cannot be granted under launchd. See the Things section below.
 
 Date range semantics (all dates in the configured timezone):
   * No --start/--end given:
@@ -32,9 +36,11 @@ Subcommands: run, range, clients, auth.
 """
 
 import argparse
+import glob
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -56,6 +62,13 @@ EXIT_OK = 0
 EXIT_CONFIG = 1
 EXIT_API = 2
 EXIT_THINGS = 3
+
+# Accepted env var names, in preference order. GCAL_* is supported so an
+# existing calendar.readonly credential can be reused as-is rather than copied
+# under a second name; the first non-empty one wins.
+GOOGLE_CLIENT_ID_KEYS = ("GOOGLE_OAUTH_CLIENT_ID", "GCAL_CLIENT_ID")
+GOOGLE_CLIENT_SECRET_KEYS = ("GOOGLE_OAUTH_CLIENT_SECRET", "GCAL_CLIENT_SECRET")
+GOOGLE_REFRESH_TOKEN_KEYS = ("GOOGLE_OAUTH_REFRESH_TOKEN", "GCAL_REFRESH_TOKEN")
 
 
 # ---------------------------------------------------------------------------
@@ -122,14 +135,24 @@ def load_config(env_files=None) -> Config:
     def get(key, default=""):
         return env.get(key, default) or default
 
+    def get_any(keys, default=""):
+        """First non-empty of several accepted names, in preference order."""
+        for key in keys:
+            value = env.get(key) or ""
+            if value:
+                return value
+        return default
+
     statuses = tuple(
         s.strip() for s in get("CMT_ACTIVE_STATUSES", "Active-coaching,Active-advising").split(",")
         if s.strip()
     )
     return Config(
-        google_client_id=get("GOOGLE_OAUTH_CLIENT_ID"),
-        google_client_secret=get("GOOGLE_OAUTH_CLIENT_SECRET"),
-        google_refresh_token=get("GOOGLE_OAUTH_REFRESH_TOKEN"),
+        # GCAL_* are accepted as aliases so an existing calendar.readonly
+        # credential already in ~/.env can be reused without duplicating it.
+        google_client_id=get_any(GOOGLE_CLIENT_ID_KEYS),
+        google_client_secret=get_any(GOOGLE_CLIENT_SECRET_KEYS),
+        google_refresh_token=get_any(GOOGLE_REFRESH_TOKEN_KEYS),
         calendar_id=get("CMT_GOOGLE_CALENDAR_ID", "primary"),
         airtable_api_key=get("AIRTABLE_API_KEY"),
         airtable_base_id=get("CMT_AIRTABLE_BASE_ID"),
@@ -311,13 +334,15 @@ class Meeting:
 
 
 def google_access_token(cfg: Config) -> str:
-    for key, value in (
-        ("GOOGLE_OAUTH_CLIENT_ID", cfg.google_client_id),
-        ("GOOGLE_OAUTH_CLIENT_SECRET", cfg.google_client_secret),
-        ("GOOGLE_OAUTH_REFRESH_TOKEN", cfg.google_refresh_token),
+    for keys, value in (
+        (GOOGLE_CLIENT_ID_KEYS, cfg.google_client_id),
+        (GOOGLE_CLIENT_SECRET_KEYS, cfg.google_client_secret),
+        (GOOGLE_REFRESH_TOKEN_KEYS, cfg.google_refresh_token),
     ):
         if not value:
-            raise SystemExit2(EXIT_CONFIG, f"{key} is not set (run the `auth` subcommand for the refresh token)")
+            raise SystemExit2(
+                EXIT_CONFIG,
+                f"{' or '.join(keys)} is not set (run the `auth` subcommand for the refresh token)")
     body = urllib.parse.urlencode({
         "client_id": cfg.google_client_id,
         "client_secret": cfg.google_client_secret,
@@ -411,58 +436,101 @@ def find_client_meetings(events, clients, start: date, end: date, tz: ZoneInfo) 
 
 
 # ---------------------------------------------------------------------------
-# Things (AppleScript via osascript)
+# Things (sqlite read + things:/// URL scheme write)
+#
+# Deliberately NOT AppleScript. osascript needs an Apple Events "Automation"
+# grant, and macOS attributes that grant to the *terminal app* driving the
+# script — so it cannot be granted for a launchd run, where there is no
+# terminal in the process ancestry. Reading the sqlite database directly and
+# writing through the URL scheme needs neither, so the same code path works
+# interactively and headless.
 # ---------------------------------------------------------------------------
 
-READ_TODOS_SCRIPT = '''
-on pad(n)
-    set s to n as text
-    if length of s < 2 then set s to "0" & s
-    return s
-end pad
+THINGS_DB_GLOB = ("~/Library/Group Containers/JLMPQHK86H.com.culturedcode.ThingsMac/"
+                  "ThingsData-*/Things Database.thingsdatabase/main.sqlite")
 
-on run argv
-    set projName to item 1 of argv
-    set out to ""
-    tell application "Things3"
-        set todoList to to dos of project projName
-        repeat with t in todoList
-            set n to name of t
-            set d to due date of t
-            set st to (status of t) as text
-            if d is missing value then
-                set ds to ""
-            else
-                set ds to ((year of d) as text) & "-" & my pad((month of d) as integer) & "-" & my pad(day of d)
-            end if
-            set out to out & n & tab & ds & tab & st & linefeed
-        end repeat
-    end tell
-    return out
-end run
-'''
+# TMTask.type / TMTask.status as stored by Things 3.
+THINGS_TYPE_TODO = 0
+THINGS_TYPE_PROJECT = 1
+THINGS_STATUS = {0: "open", 2: "canceled", 3: "completed"}
 
-CREATE_TODO_SCRIPT = '''
-on run argv
-    set projName to item 1 of argv
-    set todoName to item 2 of argv
-    set y to (item 3 of argv) as integer
-    set m to (item 4 of argv) as integer
-    set d to (item 5 of argv) as integer
-    set todoNotes to item 6 of argv
-    set dl to current date
-    set time of dl to 0
-    set day of dl to 1
-    set year of dl to y
-    set month of dl to m
-    set day of dl to d
-    tell application "Things3"
-        set p to project projName
-        set newToDo to make new to do with properties {name:todoName, notes:todoNotes, due date:dl} at beginning of p
-        return id of newToDo
-    end tell
-end run
-'''
+# things:/// is fire-and-forget, so creates are confirmed by re-reading the DB.
+CREATE_POLL_TIMEOUT = 20.0
+CREATE_POLL_INTERVAL = 0.3
+
+
+def decode_things_date(value) -> Optional[date]:
+    """Things packs deadline/startDate into an integer — NOT a unix timestamp.
+
+    Layout: bits 16+ = year, bits 12-15 = month, bits 7-11 = day.
+    """
+    if not value:
+        return None
+    year, month, day = value >> 16, (value >> 12) & 0xF, (value >> 7) & 0x1F
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def things_db_path() -> str:
+    matches = sorted(glob.glob(os.path.expanduser(THINGS_DB_GLOB)))
+    if not matches:
+        raise SystemExit2(EXIT_THINGS,
+                          "Things 3 database not found — is Things 3 installed for this user?")
+    return matches[-1]
+
+
+def things_connect():
+    """Read-only connection. Never writes: creation goes through things:///."""
+    uri = "file:" + urllib.parse.quote(things_db_path()) + "?mode=ro"
+    try:
+        return sqlite3.connect(uri, uri=True, timeout=10)
+    except sqlite3.Error as err:
+        raise SystemExit2(EXIT_THINGS, f"cannot open the Things database: {err}")
+
+
+def find_project_uuid(con, name: str) -> str:
+    rows = con.execute(
+        "SELECT uuid, status FROM TMTask WHERE type = ? AND trashed = 0 AND title = ?",
+        (THINGS_TYPE_PROJECT, name),
+    ).fetchall()
+    active = [uuid for uuid, status in rows if status == 0]
+    if len(active) == 1:
+        return active[0]
+    if len(active) > 1:
+        raise SystemExit2(EXIT_THINGS,
+                          f"more than one active Things project is named {name!r} — "
+                          "rename one, or set CMT_THINGS_PROJECT to an unambiguous name")
+    if rows:
+        raise SystemExit2(EXIT_THINGS,
+                          f"Things project {name!r} exists but is completed or canceled")
+    hint = ""
+    needle = norm_title(name)
+    near = [t for (t,) in con.execute(
+        "SELECT title FROM TMTask WHERE type = ? AND trashed = 0 AND status = 0",
+        (THINGS_TYPE_PROJECT,)).fetchall()
+        if t and (needle in norm_title(t) or norm_title(t) in needle)]
+    if near:
+        hint = " — did you mean: " + ", ".join(repr(t) for t in sorted(near)[:5]) + "?"
+    raise SystemExit2(EXIT_THINGS,
+                      f"Things project {name!r} not found (set CMT_THINGS_PROJECT){hint}")
+
+
+def _project_todo_rows(con, project_uuid: str):
+    """To-dos directly in the project OR nested under one of its headings.
+
+    A to-do filed under a heading has project = NULL and heading = <heading uuid>,
+    so the join is required — without it such tasks are invisible to dedup and
+    the tool would create duplicates alongside them.
+    """
+    return con.execute(
+        "SELECT t.uuid, t.title, t.deadline, t.status "
+        "FROM TMTask t LEFT JOIN TMTask h ON t.heading = h.uuid "
+        "WHERE t.type = ? AND t.trashed = 0 "
+        "AND (t.project = ? OR h.project = ?)",
+        (THINGS_TYPE_TODO, project_uuid, project_uuid),
+    ).fetchall()
 
 
 @dataclass
@@ -472,51 +540,94 @@ class ExistingTodo:
     status: str  # open / completed / canceled
 
 
-def osascript(script: str, args: list) -> str:
-    try:
-        proc = subprocess.run(
-            ["osascript", "-", *args],
-            input=script, capture_output=True, text=True, timeout=60,
-        )
-    except FileNotFoundError:
-        raise SystemExit2(EXIT_THINGS, "osascript not found — this tool must run on macOS with Things 3 installed")
-    except subprocess.TimeoutExpired:
-        raise SystemExit2(EXIT_THINGS, "osascript timed out talking to Things 3")
-    if proc.returncode != 0:
-        raise SystemExit2(EXIT_THINGS, f"AppleScript error: {proc.stderr.strip()}")
-    return proc.stdout
-
-
 def read_existing_todos(cfg: Config) -> list:
-    out = osascript(READ_TODOS_SCRIPT, [cfg.things_project])
-    todos = []
-    for line in out.splitlines():
-        if not line.strip():
-            continue
-        parts = line.split("\t")
-        title = parts[0]
-        deadline = None
-        if len(parts) > 1 and parts[1].strip():
-            try:
-                deadline = date.fromisoformat(parts[1].strip())
-            except ValueError:
-                pass
-        status = parts[2].strip() if len(parts) > 2 else "open"
-        todos.append(ExistingTodo(title=title, deadline=deadline, status=status))
-    return todos
+    con = things_connect()
+    try:
+        project_uuid = find_project_uuid(con, cfg.things_project)
+        return [
+            ExistingTodo(title=title or "",
+                         deadline=decode_things_date(deadline),
+                         status=THINGS_STATUS.get(status, "open"))
+            for _uuid, title, deadline, status in _project_todo_rows(con, project_uuid)
+        ]
+    finally:
+        con.close()
+
+
+def _matching_uuids(project_uuid: str, title: str, deadline: date) -> set:
+    """UUIDs of non-trashed to-dos in the project with exactly this title+deadline."""
+    con = things_connect()
+    try:
+        return {
+            uuid for uuid, existing_title, existing_deadline, _status
+            in _project_todo_rows(con, project_uuid)
+            if (existing_title or "") == title and decode_things_date(existing_deadline) == deadline
+        }
+    finally:
+        con.close()
 
 
 def create_todo(cfg: Config, title: str, deadline: date, notes: str) -> str:
-    return osascript(CREATE_TODO_SCRIPT, [
-        cfg.things_project, title,
-        str(deadline.year), str(deadline.month), str(deadline.day),
-        notes,
-    ]).strip()
+    """Create one to-do via things:/// and confirm it landed, returning its uuid.
+
+    The URL scheme returns nothing, so "did it work?" is answered by diffing the
+    project's to-dos before and after rather than by trusting the open(1) exit
+    code — which only reports that the URL was handed off.
+    """
+    con = things_connect()
+    try:
+        project_uuid = find_project_uuid(con, cfg.things_project)
+    finally:
+        con.close()
+    before = _matching_uuids(project_uuid, title, deadline)
+
+    url = "things:///add?" + urllib.parse.urlencode({
+        "title": title,
+        "notes": notes,
+        "deadline": deadline.isoformat(),
+        "list-id": project_uuid,   # id, not name — immune to emoji/renaming
+    }, quote_via=urllib.parse.quote)
+    try:
+        proc = subprocess.run(["open", "-g", url], capture_output=True, text=True, timeout=30)
+    except FileNotFoundError:
+        raise SystemExit2(EXIT_THINGS, "open(1) not found — this tool must run on macOS")
+    except subprocess.TimeoutExpired:
+        raise SystemExit2(EXIT_THINGS, f"timed out handing {title!r} to Things via things:///")
+    if proc.returncode != 0:
+        raise SystemExit2(EXIT_THINGS,
+                          f"things:/// URL rejected for {title!r}: {proc.stderr.strip()}")
+
+    give_up_at = time.monotonic() + CREATE_POLL_TIMEOUT
+    while time.monotonic() < give_up_at:
+        time.sleep(CREATE_POLL_INTERVAL)
+        appeared = _matching_uuids(project_uuid, title, deadline) - before
+        if appeared:
+            return sorted(appeared)[0]
+    raise SystemExit2(EXIT_THINGS,
+                      f"handed {title!r} to Things but it did not appear in the database "
+                      f"within {CREATE_POLL_TIMEOUT:.0f}s — is Things 3 running?")
 
 
 # ---------------------------------------------------------------------------
 # Task planning + dedup
 # ---------------------------------------------------------------------------
+
+# Hardcoded rather than strftime("%a") so a launchd run under a different
+# locale cannot produce differently-spelled titles (which would defeat dedup).
+WEEKDAY_ABBR = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def task_title(kind: str, display: str, meeting_date: date) -> str:
+    """"Prep - Marissa (Wed)" — the suffix is the weekday of the MEETING.
+
+    Both tasks in a pair carry the same suffix, so a Wednesday meeting yields
+    "Prep - Marissa (Wed)" (due Tuesday) and "Notes - Marissa (Wed)" (due
+    Wednesday). This matches the convention already used in the Things project;
+    diverging from it would mean the dedup check never matches the tasks that
+    are already there, and every run would create a second pair.
+    """
+    return f"{'Prep' if kind == 'prep' else 'Notes'} - {display} ({WEEKDAY_ABBR[meeting_date.weekday()]})"
+
 
 @dataclass
 class PlannedTask:
@@ -538,7 +649,7 @@ def plan_tasks(meetings, today: date) -> list:
             ("prep", clamp_deadline(meeting.meeting_date - timedelta(days=1), meeting.meeting_date, today)),
             ("notes", meeting.meeting_date),
         ):
-            title = f"{'Prep' if kind == 'prep' else 'Notes'} - {display}"
+            title = task_title(kind, display, meeting.meeting_date)
             key = (norm_title(title), deadline)
             if key in seen:  # same client, same day, two events
                 continue

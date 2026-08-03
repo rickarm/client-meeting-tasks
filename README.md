@@ -8,8 +8,15 @@ configured Things project (default **Client Ops**):
 
 | Task | Deadline |
 |------|----------|
-| `Prep - <client first name>` | the day **before** the meeting |
-| `Notes - <client first name>` | the day **of** the meeting |
+| `Prep - <first name> (<Ddd>)` | the day **before** the meeting |
+| `Notes - <first name> (<Ddd>)` | the day **of** the meeting |
+
+`<Ddd>` is the weekday of the **meeting**, and both tasks in a pair carry the same
+one — a Wednesday meeting produces `Prep - Marissa (Wed)` due Tuesday and
+`Notes - Marissa (Wed)` due Wednesday. This matches the convention already used
+in the project; the suffix is part of the title the duplicate check compares, so
+changing its shape would make every run create a second pair alongside the
+existing tasks.
 
 It reads the existing to-dos in the project first and never creates duplicates.
 
@@ -18,7 +25,7 @@ skill, launchd, …): predictable CLI, `--dry-run`, `--json` output, meaningful 
 
 ## Requirements
 
-- macOS with Things 3 installed (tasks are created via AppleScript / `osascript`)
+- macOS with Things 3 installed (see [Things access](#things-access) below)
 - Python 3.9+ (the system `/usr/bin/python3` is fine — no packages to install)
 - A Google OAuth client + refresh token with `calendar.readonly` scope (setup below)
 - An Airtable personal access token with read access to your clients base
@@ -30,9 +37,9 @@ All configuration comes from environment variables. The tool also reads `~/.env`
 
 | Variable | Required | Default | Meaning |
 |----------|----------|---------|---------|
-| `GOOGLE_OAUTH_CLIENT_ID` | yes | — | OAuth client id (Desktop app type) |
-| `GOOGLE_OAUTH_CLIENT_SECRET` | yes | — | OAuth client secret |
-| `GOOGLE_OAUTH_REFRESH_TOKEN` | yes | — | From the one-time `auth` subcommand |
+| `GOOGLE_OAUTH_CLIENT_ID` | yes | — | OAuth client id (Desktop app type). Alias: `GCAL_CLIENT_ID` |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | yes | — | OAuth client secret. Alias: `GCAL_CLIENT_SECRET` |
+| `GOOGLE_OAUTH_REFRESH_TOKEN` | yes | — | From the one-time `auth` subcommand. Alias: `GCAL_REFRESH_TOKEN` |
 | `AIRTABLE_API_KEY` | yes | — | Airtable personal access token |
 | `CMT_AIRTABLE_BASE_ID` | yes | — | Base id (`app…`) holding the contacts table |
 | `CMT_GOOGLE_CALENDAR_ID` | no | `primary` | Calendar to scan |
@@ -47,6 +54,11 @@ All configuration comes from environment variables. The tool also reads `~/.env`
 | `CMT_DEDUP_WINDOW_DAYS` | no | `3` | Duplicate window, see below |
 
 ### One-time Google setup
+
+Skip this entirely if you already have a Google OAuth client and refresh token with
+the `calendar.readonly` scope in `~/.env` under `GCAL_CLIENT_ID` /
+`GCAL_CLIENT_SECRET` / `GCAL_REFRESH_TOKEN` — those names are read as aliases, so
+the credential does not need to be duplicated under a second name.
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create (or reuse) a
    project, enable the **Google Calendar API**, and create an OAuth client of type
@@ -70,7 +82,26 @@ All configuration comes from environment variables. The tool also reads `~/.env`
 ```
 
 Exit codes: `0` success, `1` configuration error, `2` Google/Airtable API error,
-`3` Things/AppleScript error (also used when some creates failed).
+`3` Things error (also used when some creates failed).
+
+## Things access
+
+Reads go straight to the Things 3 sqlite database (read-only); writes go through
+the `things:///add` URL scheme. **Not AppleScript** — `osascript` needs an Apple
+Events "Automation" grant, and macOS attributes that grant to the *terminal app*
+driving the script, so it can never be granted for a `launchd` run, where there is
+no terminal in the process ancestry. The sqlite + URL-scheme path needs no TCC
+grant beyond the Full Disk Access the runner already needs, so the same code works
+interactively and headless.
+
+Because the URL scheme is fire-and-forget, every create is confirmed by re-reading
+the database (up to 20s) before being reported as created; a task that never shows
+up is reported in `errors`, not `created`.
+
+`CMT_THINGS_PROJECT` must match the project title **exactly**, including any emoji
+(e.g. `🌱 Client Ops`, not `Client Ops`). A wrong name exits `3` and suggests near
+matches. To-dos filed under a heading inside the project are included in the
+duplicate check.
 
 ## Date semantics (read this before trusting it)
 
@@ -105,7 +136,8 @@ skipped: cancelled events, declined-by-you events, and non-default event types
 (focus time, OOO, working location, birthdays).
 
 If two *different* active clients share a first name in the same run, titles are
-disambiguated with the last-name initial (`Prep - Brett L.` / `Prep - Brett T.`).
+disambiguated with the last-name initial (`Prep - Brett L. (Tue)` /
+`Prep - Brett T. (Wed)`).
 
 ## Duplicate rules
 
