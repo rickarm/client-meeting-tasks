@@ -330,3 +330,22 @@ class TestGoogleCredentialAliases(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConfigIgnoresHomeEnv(unittest.TestCase):
+    def test_load_config_ignores_home_env(self):
+        import os, tempfile
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as cwd:
+            with open(os.path.join(home, ".env"), "w") as f:
+                f.write("AIRTABLE_API_KEY=leak\nCMT_THINGS_PROJECT=leak\n")
+            env = {k: v for k, v in os.environ.items() if not k.startswith(("AIRTABLE", "CMT_", "GCAL_", "GOOGLE_"))}
+            env["HOME"] = home
+            old = os.getcwd()
+            os.chdir(cwd)
+            try:
+                with patch.dict(os.environ, env, clear=True):
+                    cfg = cmt.load_config()
+            finally:
+                os.chdir(old)
+        self.assertEqual(cfg.airtable_api_key, "")

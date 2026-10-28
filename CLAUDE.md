@@ -26,10 +26,12 @@ python3 -m py_compile client_meeting_tasks.py     # what CI runs first
 ./client_meeting_tasks.py auth                    # one-time Google OAuth (interactive only)
 ```
 
-**Run from the repo root.** Config falls back to `~/.env` then `./.env` *resolved against the
-current working directory*. `CMT_THINGS_PROJECT=🌱 Client Ops` lives only in the repo's `.env`,
-not `~/.env` — so running from any other directory exits `3` with
-`Things project 'Client Ops' not found`. Either `cd` here first or pass the variable explicitly.
+**Run it as `bin/run <subcommand>`.** Secrets (`AIRTABLE_API_KEY`, `GCAL_*`) arrive in the process
+env from the `client-meeting-tasks` 1Password Environment, injected by `~/scripts/wrappers/op-run.sh`
+(rickarm/scripts); `~/.env` is never read. Config falls back to `./.env` *resolved against the current
+working directory*, where `CMT_THINGS_PROJECT=🌱 Client Ops` lives, so a bare `./client_meeting_tasks.py`
+from another directory exits `3` with `Things project 'Client Ops' not found`; `bin/run` cd's to the repo
+root first.
 
 Python floor is **3.9** (`ZoneInfo`); the CI matrix is 3.9 + 3.12, where 3.9 deliberately mirrors
 the Mac mini's system `python3`. No third-party dependencies — keep it that way.

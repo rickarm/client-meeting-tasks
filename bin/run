@@ -1,0 +1,8 @@
+#!/bin/bash
+# bin/run: run client_meeting_tasks.py from the repo root with its 1Password
+# Environment (client-meeting-tasks: AIRTABLE_API_KEY, GCAL_*) injected by
+# ~/scripts/wrappers/op-run.sh (rickarm/scripts). ./.env holds config only.
+#
+#   ~/Dev/client-meeting-tasks/bin/run run --dry-run --json
+cd "$(dirname "$0")/.." || exit 1
+exec "${OP_RUN:-$HOME/scripts/wrappers/op-run.sh}" --require AIRTABLE_API_KEY GCAL_REFRESH_TOKEN client-meeting-tasks -- /usr/bin/python3 ./client_meeting_tasks.py "$@"
