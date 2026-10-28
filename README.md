@@ -32,8 +32,10 @@ skill, launchd, …): predictable CLI, `--dry-run`, `--json` output, meaningful 
 
 ## Configuration
 
-All configuration comes from environment variables. The tool also reads `~/.env` and
-`./.env` (simple `KEY=VALUE` lines; process environment wins). See `.env.example`.
+All configuration comes from environment variables. The tool also reads `./.env` (simple
+`KEY=VALUE` lines; process environment wins) for non-secret config. See `.env.example`.
+On the Mac mini, secrets arrive in the process env from the `client-meeting-tasks` 1Password
+Environment: run it as `bin/run <subcommand>` (injects via `~/scripts/wrappers/op-run.sh`).
 
 | Variable | Required | Default | Meaning |
 |----------|----------|---------|---------|
@@ -56,17 +58,17 @@ All configuration comes from environment variables. The tool also reads `~/.env`
 ### One-time Google setup
 
 Skip this entirely if you already have a Google OAuth client and refresh token with
-the `calendar.readonly` scope in `~/.env` under `GCAL_CLIENT_ID` /
+the `calendar.readonly` scope in your environment under `GCAL_CLIENT_ID` /
 `GCAL_CLIENT_SECRET` / `GCAL_REFRESH_TOKEN` — those names are read as aliases, so
 the credential does not need to be duplicated under a second name.
 
 1. In [Google Cloud Console](https://console.cloud.google.com/), create (or reuse) a
    project, enable the **Google Calendar API**, and create an OAuth client of type
-   **Desktop app**. Put its id/secret in `~/.env` as `GOOGLE_OAUTH_CLIENT_ID` /
+   **Desktop app**. Export its id/secret as `GOOGLE_OAUTH_CLIENT_ID` /
    `GOOGLE_OAUTH_CLIENT_SECRET`.
 2. On the machine that will run the tool: `./client_meeting_tasks.py auth`
    — approve in the browser, then copy the printed `GOOGLE_OAUTH_REFRESH_TOKEN=…`
-   line into `~/.env`.
+   line into your secret store (on the Mac mini, the 1Password Environment).
 
 ## Usage
 
@@ -188,4 +190,4 @@ detection, and env-file parsing. No network or Things access needed.
 ## License
 
 MIT — see `LICENSE`. This repo contains no credentials or client data; everything
-sensitive stays in `~/.env` on the machine that runs it.
+sensitive stays in the process environment (a 1Password Environment) on the machine that runs it.

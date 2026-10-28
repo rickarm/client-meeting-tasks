@@ -122,10 +122,13 @@ def parse_env_file(path: str) -> dict:
 
 
 def load_config(env_files=None) -> Config:
-    """Build config from process env, with ~/.env and ./.env as fallbacks."""
+    """Build config from the process env, with ./.env (non-secret config) as the fallback.
+
+    Secrets arrive in the process env from the client-meeting-tasks 1Password
+    Environment (bin/run injects it); ~/.env is never read (rickarm/scripts#61).
+    """
     env = {}
     files = env_files if env_files is not None else [
-        os.path.expanduser("~/.env"),
         os.path.join(os.getcwd(), ".env"),
     ]
     for path in files:
